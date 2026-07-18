@@ -4,7 +4,7 @@ services:
   filabridge:
     image: ghcr.io/needo37/filabridge:latest
     ports:
-      - "5000:5000"
+      - "7456:7456"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

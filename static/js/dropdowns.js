@@ -448,6 +448,6 @@ function openSpoolmanEdit(spoolId) {
         return;
     }
     
-    const editURL = `${spoolmanBaseURL}/spool/edit/${spoolId}`;
+    const editURL = `${spoolmanBaseURL}/spool/show/${spoolId}`;
     window.open(editURL, '_blank');
 }

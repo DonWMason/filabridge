@@ -397,7 +397,7 @@ jobs:
             2. Make it executable (Linux/macOS): `chmod +x filabridge-*`
             3. Run Spoolman: `docker run -d --name spoolman -p 8000:8000 ghcr.io/donkie/spoolman:latest`
             4. Start FilaBridge: `./filabridge-*`
-            5. Open http://localhost:5000 and configure your printers
+            5. Open http://localhost:7456 and configure your printers
             
             ## Verify Downloads
             
