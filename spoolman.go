@@ -290,51 +290,44 @@ func (c *SpoolmanClient) UpdateSpool(spoolID int, data map[string]interface{}) e
 	return nil
 }
 
-// UpdateSpoolUsage updates spool used weight based on usage (core bridge functionality)
+// UpdateSpoolUsage records consumed filament against a spool (core bridge functionality).
+//
+// It uses Spoolman's dedicated incremental "use" endpoint (PUT /api/v1/spool/{id}/use)
+// with a use_weight delta in grams. This is important for FilaMan compatibility: FilaMan's
+// Spoolman-compatible API does not persist used_weight (it stores only remaining_weight and
+// derives used_weight = initial_weight - remaining_weight on read). A direct PATCH of
+// used_weight is therefore silently ignored by FilaMan unless initial_weight is sent in the
+// same payload. The /use endpoint decrements remaining_weight directly and works against both
+// real Spoolman and FilaMan, and also avoids a fragile GET/read-modify-write PATCH round-trip.
 func (c *SpoolmanClient) UpdateSpoolUsage(spoolID int, filamentUsed float64) error {
-	// Get current spool data
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/spool/%d", c.baseURL, spoolID), nil)
-	if err != nil {
-		return fmt.Errorf("error creating request: %w", err)
+	useData := map[string]interface{}{
+		"use_weight": filamentUsed,
 	}
+
+	jsonData, err := json.Marshal(useData)
+	if err != nil {
+		return fmt.Errorf("error marshaling spool usage data: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", fmt.Sprintf("%s/api/v1/spool/%d/use", c.baseURL, spoolID), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating usage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	c.addAuthHeader(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("error getting spool %d from Spoolman: %w", spoolID, err)
+		return fmt.Errorf("error recording usage for spool %d in Spoolman: %w", spoolID, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("spool %d not found in Spoolman: %w", spoolID, c.handleAPIError(resp))
+		return fmt.Errorf("failed to record usage for spool %d: %w", spoolID, c.handleAPIError(resp))
 	}
 
-	var spool SpoolmanSpool
-	if err := json.NewDecoder(resp.Body).Decode(&spool); err != nil {
-		return fmt.Errorf("error decoding spool %d from Spoolman: %w", spoolID, err)
-	}
-
-	// Calculate new used weight
-	newUsedWeight := spool.UsedWeight + filamentUsed
-	currentTime := time.Now().UTC().Format(time.RFC3339)
-
-	// Update used_weight and timestamps
-	updateData := map[string]interface{}{
-		"used_weight": newUsedWeight,
-		"last_used":   currentTime,
-	}
-
-	// Set first_used if it's not already set
-	if spool.FirstUsed == "" {
-		updateData["first_used"] = currentTime
-	}
-
-	if err := c.UpdateSpool(spoolID, updateData); err != nil {
-		return fmt.Errorf("failed to update spool %d: %w", spoolID, err)
-	}
-
-	fmt.Printf("Updated spool %d: used_weight %.2fg -> %.2fg (added %.2fg)\n",
-		spoolID, spool.UsedWeight, newUsedWeight, filamentUsed)
+	fmt.Printf("Recorded usage on spool %d: consumed %.2fg (via /use endpoint)\n",
+		spoolID, filamentUsed)
 
 	return nil
 }
