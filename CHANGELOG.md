@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- record filament consumption via Spoolman /use endpoint (#1)
+
+### Changed
+
+- persist db on mounted volume via FILABRIDGE_DB_PATH
+
+## [v0.2.7] - 2026-07-26
+
+### Fixed
+
 - record filament consumption via Spoolman `/use` endpoint so FilaMan stores real usage instead of zeros
 
 ## [v0.2.6] - 2026-07-18
