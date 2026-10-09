@@ -34,6 +34,7 @@ type Config struct {
 	SpoolmanURL                  string
 	SpoolmanUsername             string
 	SpoolmanPassword             string
+	FilaManAPIKey                string
 	PollInterval                 time.Duration
 	LocationSyncInterval         time.Duration
 	DBFile                       string
@@ -94,6 +95,7 @@ func LoadConfig(bridge *FilamentBridge) (*Config, error) {
 		SpoolmanURL:                  configValues[ConfigKeySpoolmanURL],
 		SpoolmanUsername:             configValues[ConfigKeySpoolmanUsername],
 		SpoolmanPassword:             configValues[ConfigKeySpoolmanPassword],
+		FilaManAPIKey:                configValues[ConfigKeyFilaManAPIKey],
 		PollInterval:                 time.Duration(pollInterval) * time.Second,
 		LocationSyncInterval:         time.Duration(locationSyncInterval) * time.Minute,
 		DBFile:                       getDBFilePath(),
