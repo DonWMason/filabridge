@@ -21,6 +21,7 @@ type FilamentBridge struct {
 	db               *sql.DB
 	wasPrinting      map[string]bool
 	currentJobFile   map[string]string     // Store current job filename per printer
+	currentJobName   map[string]string     // Store current job display name per printer
 	processingPrints map[string]bool       // Track prints being processed
 	printErrors      map[string]PrintError // Store print processing errors
 	errorMutex       sync.RWMutex
@@ -75,9 +76,10 @@ type PrinterData struct {
 func NewFilamentBridge(config *Config) (*FilamentBridge, error) {
 	bridge := &FilamentBridge{
 		config:           config,
-		spoolman:         NewSpoolmanClient(DefaultSpoolmanURL, SpoolmanTimeout, "", ""), // Default URL and timeout, will be updated
+		spoolman:         NewSpoolmanClient(DefaultSpoolmanURL, SpoolmanTimeout, "", "", ""), // Default URL and timeout, will be updated
 		wasPrinting:      make(map[string]bool),
 		currentJobFile:   make(map[string]string),
+		currentJobName:   make(map[string]string),
 		processingPrints: make(map[string]bool),
 		printErrors:      make(map[string]PrintError),
 	}
@@ -89,7 +91,7 @@ func NewFilamentBridge(config *Config) (*FilamentBridge, error) {
 
 	// Update Spoolman URL and timeout if config is provided
 	if config != nil && config.SpoolmanURL != "" {
-		bridge.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword)
+		bridge.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword, config.FilaManAPIKey)
 	}
 
 	return bridge, nil
@@ -330,6 +332,7 @@ func (b *FilamentBridge) initializeDefaultConfig() error {
 		ConfigKeySpoolmanURL:                     DefaultSpoolmanURL,
 		ConfigKeySpoolmanUsername:                "", // Spoolman basic auth username (optional)
 		ConfigKeySpoolmanPassword:                "", // Spoolman basic auth password (optional)
+		ConfigKeyFilaManAPIKey:                   "", // FilaMan API key for native consumption events (optional)
 		ConfigKeyPollInterval:                    fmt.Sprintf("%d", DefaultPollInterval),
 		ConfigKeyWebPort:                         DefaultWebPort,
 		ConfigKeyPrusaLinkTimeout:                fmt.Sprintf("%d", PrusaLinkTimeout),
@@ -370,6 +373,7 @@ func getConfigDescription(key string) string {
 		ConfigKeySpoolmanURL:                     "URL of Spoolman instance",
 		ConfigKeySpoolmanUsername:                "Spoolman basic auth username (optional, leave empty if not using basic auth)",
 		ConfigKeySpoolmanPassword:                "Spoolman basic auth password (optional, leave empty if not using basic auth)",
+		ConfigKeyFilaManAPIKey:                   "FilaMan API key (optional). When set, usage is recorded via FilaMan's native API with the print filename as the event note",
 		ConfigKeyPollInterval:                    "Polling interval in seconds",
 		ConfigKeyWebPort:                         "Port for web interface",
 		ConfigKeyPrusaLinkTimeout:                "PrusaLink API timeout in seconds",
@@ -690,7 +694,7 @@ func (b *FilamentBridge) ReloadConfig() error {
 	b.mutex.Lock()
 	b.config = config
 	if config.SpoolmanURL != "" {
-		b.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword)
+		b.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword, config.FilaManAPIKey)
 	}
 	b.mutex.Unlock()
 
@@ -715,7 +719,7 @@ func (b *FilamentBridge) UpdateConfig(config *Config) error {
 	defer b.mutex.Unlock()
 
 	b.config = config
-	b.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword)
+	b.spoolman = NewSpoolmanClient(config.SpoolmanURL, config.SpoolmanTimeout, config.SpoolmanUsername, config.SpoolmanPassword, config.FilaManAPIKey)
 
 	return nil
 }
@@ -997,6 +1001,7 @@ func (b *FilamentBridge) monitorPrusaLink(printerID string, config PrinterConfig
 	b.mutex.RLock()
 	wasPrinting := b.wasPrinting[printerID]
 	storedJobFile := b.currentJobFile[printerID]
+	storedJobName := b.currentJobName[printerID]
 	b.mutex.RUnlock()
 
 	// Debug logging for all printers
@@ -1023,13 +1028,18 @@ func (b *FilamentBridge) monitorPrusaLink(printerID string, config PrinterConfig
 		b.mutex.Unlock()
 
 		// Now process the print (this takes a long time)
-		err := b.handlePrusaLinkPrintFinished(config, filenameToUse)
+		jobNameToUse := storedJobName
+		if jobNameToUse == "" && jobInfo.File.DisplayName != "" {
+			jobNameToUse = jobInfo.File.DisplayName
+		}
+		err := b.handlePrusaLinkPrintFinished(config, filenameToUse, jobNameToUse)
 
 		// Clear processing flag and filename after completion
 		b.mutex.Lock()
 		b.processingPrints[printerID] = false
 		if err == nil {
 			b.currentJobFile[printerID] = ""
+			b.currentJobName[printerID] = ""
 		}
 		b.mutex.Unlock()
 
@@ -1044,6 +1054,7 @@ func (b *FilamentBridge) monitorPrusaLink(printerID string, config PrinterConfig
 		// Store the current job filename when printing starts (only if not already stored)
 		if currentState == StatePrinting && currentJobFilename != "" && storedJobFile == "" {
 			b.currentJobFile[printerID] = currentJobFilename
+			b.currentJobName[printerID] = jobInfo.File.DisplayName
 			log.Printf("📁 Stored job filename for %s (%s): %s", config.IPAddress, printerID, currentJobFilename)
 		}
 
@@ -1053,6 +1064,7 @@ func (b *FilamentBridge) monitorPrusaLink(printerID string, config PrinterConfig
 		// Clear stored filename when print finishes (but only if not currently processing)
 		if (currentState == StateIdle || currentState == StateFinished) && !b.processingPrints[printerID] {
 			b.currentJobFile[printerID] = ""
+			b.currentJobName[printerID] = ""
 		}
 	}
 
@@ -1060,7 +1072,8 @@ func (b *FilamentBridge) monitorPrusaLink(printerID string, config PrinterConfig
 }
 
 // handlePrusaLinkPrintFinished handles when a print job finishes via PrusaLink
-func (b *FilamentBridge) handlePrusaLinkPrintFinished(config PrinterConfig, filename string) error {
+// jobName is the human-readable PrusaLink display name; it falls back to the base of filename.
+func (b *FilamentBridge) handlePrusaLinkPrintFinished(config PrinterConfig, filename, jobName string) error {
 	log.Printf("Print finished via PrusaLink (%s): %s", config.IPAddress, filename)
 
 	printerName := resolvePrinterName(config)
@@ -1104,7 +1117,10 @@ func (b *FilamentBridge) handlePrusaLinkPrintFinished(config PrinterConfig, file
 	log.Printf("Successfully parsed G-code file for filament usage: %+v", filamentUsage)
 
 	// Process filament usage using helper function
-	if err := b.processFilamentUsage(printerName, filamentUsage, filename); err != nil {
+	if jobName == "" {
+		jobName = filepath.Base(filename)
+	}
+	if err := b.processFilamentUsage(printerName, filamentUsage, jobName); err != nil {
 		log.Printf("Error processing filament usage: %v", err)
 		return err
 	}
@@ -1303,8 +1319,9 @@ func (b *FilamentBridge) processFilamentUsage(printerName string, filamentUsage 
 			continue
 		}
 
-		// Update Spoolman
-		if err := b.spoolman.UpdateSpoolUsage(spoolID, usedWeight); err != nil {
+		// Update Spoolman (the note is only stored when FilaMan's native API is configured)
+		note := fmt.Sprintf("%s: %s", printerName, jobName)
+		if err := b.spoolman.UpdateSpoolUsage(spoolID, usedWeight, note); err != nil {
 			log.Printf("Error updating spool %d usage: %v", spoolID, err)
 			continue
 		}

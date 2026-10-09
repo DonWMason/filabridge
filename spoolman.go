@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,6 +20,8 @@ type SpoolmanClient struct {
 	httpClient *http.Client
 	username   string
 	password   string
+	// filamanAPIKey enables FilaMan's native consumption endpoint (optional)
+	filamanAPIKey string
 }
 
 // GetBaseURL returns the Spoolman base URL
@@ -86,7 +90,7 @@ type SpoolmanError struct {
 }
 
 // NewSpoolmanClient creates a new Spoolman client
-func NewSpoolmanClient(baseURL string, timeout int, username, password string) *SpoolmanClient {
+func NewSpoolmanClient(baseURL string, timeout int, username, password, filamanAPIKey string) *SpoolmanClient {
 	return &SpoolmanClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
@@ -97,8 +101,9 @@ func NewSpoolmanClient(baseURL string, timeout int, username, password string) *
 				IdleConnTimeout:     30 * time.Second,
 			},
 		},
-		username: username,
-		password: password,
+		username:      username,
+		password:      password,
+		filamanAPIKey: filamanAPIKey,
 	}
 }
 
@@ -292,6 +297,11 @@ func (c *SpoolmanClient) UpdateSpool(spoolID int, data map[string]interface{}) e
 
 // UpdateSpoolUsage records consumed filament against a spool (core bridge functionality).
 //
+// When a FilaMan API key is configured, usage is recorded via FilaMan's native consumption
+// endpoint so the note (e.g. "Prusa XL: benchy.bgcode") is stored on the spool event. The
+// Spoolman-compatible /use endpoint has no note field. If FilaMan rejects the request outright
+// (bad key, missing permission, endpoint not found) we fall back to /use so usage isn't lost.
+//
 // It uses Spoolman's dedicated incremental "use" endpoint (PUT /api/v1/spool/{id}/use)
 // with a use_weight delta in grams. This is important for FilaMan compatibility: FilaMan's
 // Spoolman-compatible API does not persist used_weight (it stores only remaining_weight and
@@ -299,7 +309,20 @@ func (c *SpoolmanClient) UpdateSpool(spoolID int, data map[string]interface{}) e
 // used_weight is therefore silently ignored by FilaMan unless initial_weight is sent in the
 // same payload. The /use endpoint decrements remaining_weight directly and works against both
 // real Spoolman and FilaMan, and also avoids a fragile GET/read-modify-write PATCH round-trip.
-func (c *SpoolmanClient) UpdateSpoolUsage(spoolID int, filamentUsed float64) error {
+func (c *SpoolmanClient) UpdateSpoolUsage(spoolID int, filamentUsed float64, note string) error {
+	if c.filamanAPIKey != "" {
+		err := c.recordFilaManConsumption(spoolID, filamentUsed, note)
+		if err == nil {
+			return nil
+		}
+		var rejected *filamanRejectedError
+		if !errors.As(err, &rejected) {
+			// The request may have reached FilaMan; retrying via /use could double-count
+			return err
+		}
+		log.Printf("Warning: FilaMan rejected consumption for spool %d (%v), falling back to /use without note", spoolID, err)
+	}
+
 	useData := map[string]interface{}{
 		"use_weight": filamentUsed,
 	}
@@ -328,6 +351,63 @@ func (c *SpoolmanClient) UpdateSpoolUsage(spoolID int, filamentUsed float64) err
 
 	fmt.Printf("Recorded usage on spool %d: consumed %.2fg (via /use endpoint)\n",
 		spoolID, filamentUsed)
+
+	return nil
+}
+
+// filamanRejectedError means FilaMan definitively refused the request, so nothing was recorded
+type filamanRejectedError struct {
+	err error
+}
+
+func (e *filamanRejectedError) Error() string { return e.err.Error() }
+func (e *filamanRejectedError) Unwrap() error { return e.err }
+
+// filamanBaseURL derives FilaMan's root URL from the Spoolman-compatible URL
+// (e.g. http://filaman:8000/spoolman -> http://filaman:8000)
+func (c *SpoolmanClient) filamanBaseURL() string {
+	return strings.TrimSuffix(strings.TrimRight(c.baseURL, "/"), "/spoolman")
+}
+
+// recordFilaManConsumption records usage via FilaMan's native API
+// (POST /api/v1/spools/{id}/consumptions), which stores a note on the spool event.
+func (c *SpoolmanClient) recordFilaManConsumption(spoolID int, filamentUsed float64, note string) error {
+	consumptionData := map[string]interface{}{
+		"delta_weight_g": filamentUsed,
+	}
+	if note != "" {
+		consumptionData["note"] = note
+	}
+
+	jsonData, err := json.Marshal(consumptionData)
+	if err != nil {
+		return fmt.Errorf("error marshaling FilaMan consumption data: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/api/v1/spools/%d/consumptions", c.filamanBaseURL(), spoolID), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return &filamanRejectedError{fmt.Errorf("error creating FilaMan consumption request: %w", err)}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "ApiKey "+c.filamanAPIKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error recording usage for spool %d in FilaMan: %w", spoolID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		apiErr := fmt.Errorf("failed to record usage for spool %d in FilaMan: %w", spoolID, c.handleAPIError(resp))
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
+			return &filamanRejectedError{apiErr}
+		}
+		return apiErr
+	}
+
+	fmt.Printf("Recorded usage on spool %d: consumed %.2fg (via FilaMan consumptions, note %q)\n",
+		spoolID, filamentUsed, note)
 
 	return nil
 }

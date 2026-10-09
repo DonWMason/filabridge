@@ -117,6 +117,11 @@ function loadConfiguration() {
                         <small>Password for Spoolman basic authentication (optional)</small>
                     </div>
                     <div class="form-group">
+                        <label><strong>FilaMan API Key (optional):</strong></label>
+                        <input type="password" id="filaman_api_key" value="${config.filaman_api_key || ''}" placeholder="Leave empty if using Spoolman">
+                        <small>FilaMan user API key with the spool_events:create_consumption permission. When set, usage is recorded via FilaMan's native API with the print filename as the event note (FilaMan URL is derived from the Spoolman URL above, minus /spoolman).</small>
+                    </div>
+                    <div class="form-group">
                         <label><strong>Poll Interval (seconds):</strong></label>
                         <input type="number" id="poll_interval" value="${config.poll_interval || '30'}" min="10" max="300">
                         <small>How often to check printer status</small>
@@ -138,6 +143,7 @@ function saveConfiguration() {
         spoolman_url: document.getElementById('spoolman_url').value,
         spoolman_username: document.getElementById('spoolman_username').value,
         spoolman_password: document.getElementById('spoolman_password').value,
+        filaman_api_key: document.getElementById('filaman_api_key').value,
         poll_interval: document.getElementById('poll_interval').value
     };
     
